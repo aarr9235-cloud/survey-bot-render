@@ -1,0 +1,117 @@
+import telebot
+from pyproj import Proj
+from flask import Flask, request
+import os
+import threading
+
+# التوكن الخاص بك
+TOKEN = '8218734058:AAHwywPFh4SXcNkPeEwnzN7kpdjxoJWiFHY'
+bot = telebot.TeleBot(TOKEN)
+
+# إعداد سيرفر Flask
+app = Flask(__name__)
+user_data = {}
+
+@app.route('/')
+def index():
+    return "Bot is Running Live!", 200
+
+# قائمة التحكم (حرف s)
+@bot.message_handler(commands=['start'])
+@bot.message_handler(func=lambda m: m.text and m.text.lower() == 's')
+def send_welcome(message):
+    welcome_text = (
+        "🏗️ بوت المساح (نسخة Render المستمرة)\n\n"
+        "1️⃣ /profile : إدخال البروفايل (مسافة,منسوب).\n"
+        "2️⃣ /hi : ضبط منسوب الميزان.\n"
+        "3️⃣ /utm : من UTM إلى عشري.\n"
+        "4️⃣ /latlon : من عشري إلى UTM.\n\n"
+        "💡 أرسل حرف s للقائمة، أو المسافة للحساب."
+    )
+    bot.reply_to(message, welcome_text)
+
+# --- تحويل من عشري إلى UTM ---
+@bot.message_handler(commands=['latlon'])
+def ask_latlon(message):
+    msg = bot.send_message(message.chat.id, "أرسل: Lat, Lon, Zone (مثال: 31.2, 30.1, 36)")
+    bot.register_next_step_handler(msg, calculate_to_utm)
+
+def calculate_to_utm(message):
+    try:
+        lat, lon, zone = map(float, message.text.split(','))
+        p = Proj(proj='utm', zone=int(zone), ellps='WGS84')
+        e, n = p(lon, lat)
+        bot.reply_to(message, f"✅ UTM Zone {int(zone)}:\nE: {e:.3f}\nN: {n:.3f}")
+    except: bot.reply_to(message, "❌ خطأ في الصيغة.")
+
+# --- تحويل من UTM إلى عشري ---
+@bot.message_handler(commands=['utm'])
+def ask_utm(message):
+    msg = bot.send_message(message.chat.id, "أرسل: E, N, Zone (مثال: 600000, 3500000, 36)")
+    bot.register_next_step_handler(msg, calculate_from_utm)
+
+def calculate_from_utm(message):
+    try:
+        e, n, z = map(float, message.text.split(','))
+        p = Proj(proj='utm', zone=int(z), ellps='WGS84', preserve_units=False)
+        lon, lat = p(e, n, inverse=True)
+        bot.reply_to(message, f"📍 Lat: {lat:.7f}\nLon: {lon:.7f}\n🔗 http://maps.google.com/maps?q={lat},{lon}")
+    except: bot.reply_to(message, "❌ خطأ في الصيغة.")
+
+# --- إدخال البروفايل ---
+@bot.message_handler(commands=['profile'])
+def ask_profile(message):
+    msg = bot.send_message(message.chat.id, "أرسل النقاط (مسافة,منسوب) كل نقطة في سطر.")
+    bot.register_next_step_handler(msg, save_profile)
+
+def save_profile(message):
+    try:
+        points = []
+        for line in message.text.strip().split('\n'):
+            dist, elev = map(float, line.split(','))
+            points.append((dist, elev))
+        points.sort()
+        user_data[message.chat.id] = {'profile': points, 'hi': user_data.get(message.chat.id, {}).get('hi')}
+        bot.reply_to(message, f"✅ تم حفظ {len(points)} نقطة.")
+    except: bot.reply_to(message, "❌ خطأ في الصيغة.")
+
+# --- منسوب الميزان ---
+@bot.message_handler(commands=['hi'])
+def ask_hi(message):
+    msg = bot.send_message(message.chat.id, "أدخل منسوب الميزان (HI):")
+    bot.register_next_step_handler(msg, save_hi)
+
+def save_hi(message):
+    try:
+        if message.chat.id not in user_data: user_data[message.chat.id] = {}
+        user_data[message.chat.id]['hi'] = float(message.text)
+        bot.reply_to(message, f"✅ تم ضبط الميزان: {message.text}")
+    except: bot.reply_to(message, "❌ أدخل رقماً فقط.")
+
+# --- الحساب الفوري ---
+@bot.message_handler(func=lambda message: True)
+def handle_calc(message):
+    try:
+        target_dist = float(message.text)
+        data = user_data.get(message.chat.id, {}).get('profile', [])
+        hi = user_data.get(message.chat.id, {}).get('hi')
+        if not data or hi is None:
+            bot.reply_to(message, "⚠️ أكمل /profile و /hi أولاً.")
+            return
+        for i in range(len(data) - 1):
+            d1, e1 = data[i]; d2, e2 = data[i+1]
+            if d1 <= target_dist <= d2:
+                slope = (e2 - e1) / (d2 - d1)
+                target_elev = e1 + (slope * (target_dist - d1))
+                bot.reply_to(message, f"📏 نتائج {target_dist}م:\n🔹 منسوب: {target_elev:.3f}\n🔸 قامة: {(hi - target_elev):.3f}")
+                return
+        bot.reply_to(message, "❌ المسافة خارج النطاق.")
+    except: pass
+
+def run_bot():
+    bot.infinity_polling()
+
+if __name__ == "__main__":
+    threading.Thread(target=run_bot).start()
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
